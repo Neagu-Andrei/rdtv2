@@ -1,0 +1,26 @@
+{
+    "files.associations": {
+        "stdbool.h": "c",
+        "bpf_helpers.h": "c",
+        "bpf_tracing.h": "c",
+        "maps.bpf.h": "c",
+        "constants.bpf.h": "c",
+        "bpf.h": "c",
+        "vmlinux.h": "c",
+        "helpers.bpf.h": "c",
+        "ransomware.skel.h": "c",
+        "rdts_uapi.h": "c",
+        "rtds.skel.h": "c",
+        "numbers": "c"
+    },
+    "github.copilot.editor.enableAutoCompletions": false
+
+
+
+
+
+
+
+
+
+}

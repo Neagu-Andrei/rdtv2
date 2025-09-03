@@ -1,0 +1,20 @@
+# Build artifacts
+*.o
+*.a
+*.so
+*.out
+*.skel.h
+*.skel.c
+*.bpf.o
+
+# Logs and traces
+*.log
+*.trace
+*.pcap
+
+# Editor/IDE configs
+.vscode/
+.idea/
+
+# System files
+.DS_Store

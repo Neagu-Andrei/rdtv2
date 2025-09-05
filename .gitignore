@@ -7,6 +7,10 @@
 *.skel.c
 *.bpf.o
 
+# Build directories
+obj/
+include/
+
 # Logs and traces
 *.log
 *.trace

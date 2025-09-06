@@ -16,6 +16,24 @@
 #define AF_UNIX 1   /* aka AF_LOCAL */
 #define INPL_NBINS 12  
 
+
+/*
+We do need a Map for the configs for each event that has
+INPL_MIN_WRITES_CAP
+#define INPL_NBINS 12  
+if(opens_window->distinct_inodes >= 200 && opens_window->distinct_dirs >= 50)
+
+#ifndef INPL_MIN_WRITES_FLOOR
+#define INPL_MIN_WRITES_FLOOR 8u       // floor for tiny files
+#endif
+#ifndef INPL_MIN_WRITES_CAP
+#define INPL_MIN_WRITES_CAP   4096u    // cap for huge files
+#endif
+#ifndef INPL_MIN_TOTAL_BYTES
+#define INPL_MIN_TOTAL_BYTES  (4ULL*1024*1024) // 4 MiB bytes floor before firing
+#endif
+*/
+
 enum event_type {
     // //File Operations
     // EVENT_OPEN = 1,
@@ -48,7 +66,6 @@ enum event_type {
     EVENT_OPEN_HOST_DATA = 103,
     EVENT_MASS_WRITE = 104,
     EVENT_DATA_FOR_IMPACT = 105,
-    EVENT_MMAP_COMMIT = 106,
     EVENT_ENCRYPT_INPLACE_DOMBIN = 107,
 }; 
 
@@ -239,7 +256,6 @@ struct opens_window{
     __u32 distinct_dirs;
 };
 
-
 struct write_stats {
     __u64 first_ns;
     __u64 last_ns;
@@ -250,13 +266,6 @@ struct write_stats {
     __u64 total_bytes;
     __u64 total_calls;
     __u32 distinct_files;
-};
-
-// We built a map for mmap based encryption
-struct mmap_mark_val {
-    __u64 first_ns;
-    __u32 maps;        // number of writable+shared mmaps seen
-    __u8  fired;       // event already emitted (per root/inode)
 };
 
 // A struct for write on files with a minimal histogram

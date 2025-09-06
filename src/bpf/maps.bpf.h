@@ -31,13 +31,6 @@ struct {
     __type(value, __u32);
 } root_pid_of SEC(".maps");
 
-struct {
-    __uint(type, BPF_MAP_TYPE_LRU_HASH);
-    __uint(max_entries, 65536);
-    __type(key, __u32);
-    __type(value, __u32);
-} ppid_map SEC(".maps");
-
 // Map to store dropped events count per CPU
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
@@ -186,14 +179,6 @@ struct {
     __type(value, __u8);       // dummy data
 } dirs_seen SEC(".maps");
 
-
-// for mmap encryption
-struct {
-    __uint(type, BPF_MAP_TYPE_LRU_HASH);
-    __uint(max_entries, 131072);
-    __type(key, struct root_file_id_key);
-    __type(value, struct mmap_mark_val);
-} mmap_marks SEC(".maps");
 
 // for write encryption
 struct {

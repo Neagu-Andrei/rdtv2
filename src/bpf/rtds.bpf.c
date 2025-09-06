@@ -15,7 +15,7 @@ int BPF_PROG(tpbtf_fork, struct task_struct *parent, struct task_struct *child)
     __u32 c_tgid = BPF_CORE_READ(child,  tgid);
 
     // record lineage edge
-    (void)bpf_map_update_elem(&ppid_map, &c_tgid, &p_tgid, BPF_ANY);
+    // (void)bpf_map_update_elem(&ppid_map, &c_tgid, &p_tgid, BPF_ANY);
 
     // inherit root
     __u32 *pr = bpf_map_lookup_elem(&root_pid_of, &p_tgid);
@@ -25,16 +25,11 @@ int BPF_PROG(tpbtf_fork, struct task_struct *parent, struct task_struct *child)
     return 0;
 }
 
-// Exec: DO NOT reset root. If missing (late attach / missed fork), repair via ppid_map.
+// Exec: DO NOT reset root.
 SEC("tp_btf/sched_process_exec")
 int BPF_PROG(tpbtf_exec, struct task_struct *p, pid_t old_pid, struct linux_binprm *bprm)
 {
     __u32 tgid = BPF_CORE_READ(p, tgid);
-
-    // if (!bpf_map_lookup_elem(&root_pid_of, &tgid)) {
-    //     // We might be attaching late; try cheap repair from ppid_map chain.
-    //     repair_root_via_ppid(tgid);
-    // }
 
     // Optional: you can stash exec-specific context here if needed.
     (void)bpf_map_update_elem(&root_pid_of, &tgid, &tgid, BPF_ANY);
@@ -47,7 +42,6 @@ int BPF_PROG(tpbtf_exit, struct task_struct *p, long code)
 {
     __u32 tgid = BPF_CORE_READ(p, tgid);
     (void)bpf_map_delete_elem(&root_pid_of, &tgid);
-    (void)bpf_map_delete_elem(&ppid_map, &tgid);
     return 0;
 }
 
@@ -364,48 +358,27 @@ int BPF_PROG(exit_security_file_open, struct file *file, int ret)
 
 //     mmap_called(file);
 //     return 0;
+// }<s
+
+// // do_fsync(struct file *file, loff_t start, loff_t end, int datasync) -> int
+// SEC("fexit/do_fsync")
+// int BPF_PROG(x_do_fsync, struct file *file, int datasync, int ret)
+// {
+//     if (ret < 0 || !file) return 0;
+//     event_mmap_commit(file, datasync);
+//     return 0;
 // }
 
-SEC("fexit/security_mmap_file")
-int BPF_PROG(exit_security_mmap_file,
-             struct file *file,
-             unsigned long prot,
-             unsigned long flags,
-             int ret)
-{
-    /* Skip failed mmaps */
-    if (ret) return 0;
-
-    /* file can be NULL for anonymous mappings */
-    if (!file) return 0;
-
-    bool writable = (prot & PROT_WRITE) != 0;
-    bool shared   = (flags & MAP_SHARED) != 0;
-    if (!(writable && shared)) return 0;
-
-    mmap_called(file);
-    return 0;
-}
-
-// do_fsync(struct file *file, loff_t start, loff_t end, int datasync) -> int
-SEC("fexit/do_fsync")
-int BPF_PROG(x_do_fsync, struct file *file, int datasync, int ret)
-{
-    if (ret < 0 || !file) return 0;
-    event_mmap_commit(file, datasync);
-    return 0;
-}
-
-// fdatasync(struct file *) may route here on some kernels:
-// fexit/fdatasync or fexit/vfs_fsync_range are also viable.
-// vfs_fsync_range(file, start, end, datasync) -> int
-SEC("fexit/vfs_fsync_range")
-int BPF_PROG (x_vfs_fsync_range, struct file *file, loff_t start, loff_t end, int datasync, int ret)
-{
-    if (ret < 0 || !file) return 0;
-    event_mmap_commit(file, datasync);
-    return 0;
-}
+// // fdatasync(struct file *) may route here on some kernels:
+// // fexit/fdatasync or fexit/vfs_fsync_range are also viable.
+// // vfs_fsync_range(file, start, end, datasync) -> int
+// SEC("fexit/vfs_fsync_range")
+// int BPF_PROG (x_vfs_fsync_range, struct file *file, loff_t start, loff_t end, int datasync, int ret)
+// {
+//     if (ret < 0 || !file) return 0;
+//     event_mmap_commit(file, datasync);
+//     return 0;
+// }
 
 // vfs_write(file, buf, count, pos) -> ssize_t
 SEC("fexit/vfs_write")
@@ -428,11 +401,11 @@ int BPF_PROG( exit_vfs_writev, struct file *file, const struct iovec *iov, unsig
     return 0;
 }
 
-SEC("lsm/bprm_check_security")
-int BPF_PROG(x_bprm_check, struct linux_binprm *bprm)
-{
-    struct file *f = BPF_CORE_READ(bprm, file);
-    if (!f) return 0;
-    // bprm_check_set_sysinfo_flag(f);
-    return 0;
-}
+// SEC("lsm/bprm_check_security")
+// int BPF_PROG(x_bprm_check, struct linux_binprm *bprm)
+// {
+//     struct file *f = BPF_CORE_READ(bprm, file);
+//     if (!f) return 0;
+//     // bprm_check_set_sysinfo_flag(f);
+//     return 0;
+// }

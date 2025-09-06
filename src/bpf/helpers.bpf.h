@@ -6,173 +6,171 @@
 
 #include "maps.bpf.h"
 #include "../rdts_uapi.h"
-/* --- Access mode / open flags (kernel side). Keep here (BPF only). --- */
-#ifndef O_RDONLY
+
+/* --- Access mode / open flags  --- */
+ 
 #define O_RDONLY        00000000
-#endif
-#ifndef O_WRONLY
+ 
+ 
 #define O_WRONLY        00000001
-#endif
-#ifndef O_RDWR
+ 
+ 
 #define O_RDWR          00000002
-#endif
-#ifndef O_ACCMODE
+ 
+ 
 #define O_ACCMODE       00000003
-#endif
-#ifndef O_CREAT
+ 
+ 
 #define O_CREAT         00000100
-#endif
-#ifndef O_EXCL
+ 
+ 
 #define O_EXCL          00000200
-#endif
-#ifndef O_NOCTTY
+ 
+ 
 #define O_NOCTTY        00000400
-#endif
-#ifndef O_TRUNC
+ 
+ 
 #define O_TRUNC         00001000
-#endif
-#ifndef O_APPEND
+ 
+ 
 #define O_APPEND        00002000
-#endif
-#ifndef O_NONBLOCK
+ 
+ 
 #define O_NONBLOCK      00004000
-#endif
-#ifndef O_DSYNC
+ 
+ 
 #define O_DSYNC         00010000
-#endif
-#ifndef O_DIRECT
+ 
+ 
 #define O_DIRECT        00040000
-#endif
-#ifndef O_LARGEFILE
+ 
+ 
 #define O_LARGEFILE     00100000
-#endif
-#ifndef O_DIRECTORY
+ 
+ 
 #define O_DIRECTORY     00200000
-#endif
-#ifndef O_NOFOLLOW
+ 
+ 
 #define O_NOFOLLOW      00400000
-#endif
-#ifndef O_CLOEXEC
+ 
+ 
 #define O_CLOEXEC       02000000
-#endif
-#ifndef O_SYNC
+ 
+ 
 #define O_SYNC          04010000
-#endif
-#ifndef O_PATH
+ 
+ 
 #define O_PATH          010000000
-#endif
-#ifndef O_TMPFILE
+ 
+ 
 #define O_TMPFILE       020200000
-#endif
+ 
 
 /* --- mmap / permission bits (BPF uses these; agent does not need them). --- */
-#ifndef PROT_EXEC
+ 
 #define PROT_EXEC  0x4
-#endif
-#ifndef PROT_WRITE
+ 
+ 
 #define PROT_WRITE 0x2
-#endif
-#ifndef PROT_READ
+ 
+ 
 #define PROT_READ  0x1
-#endif
+ 
 
-#ifndef MAP_SHARED
+ 
 #define MAP_SHARED 0x01
-#endif
-#ifndef MAP_PRIVATE
+ 
+ 
 #define MAP_PRIVATE 0x02
-#endif
-#ifndef MAP_ANONYMOUS
+ 
+ 
 #define MAP_ANONYMOUS 0x20
-#endif
+ 
 
-#ifndef MAY_READ
+ 
 #define MAY_READ  0x4
-#endif
-#ifndef MAY_WRITE
+ 
+ 
 #define MAY_WRITE 0x2
-#endif
+ 
 
-#ifndef S_IXUSR
+ 
 #define S_IXUSR  0x40
-#endif
-#ifndef S_IXGRP
+ 
+ 
 #define S_IXGRP 0x08
-#endif
-#ifndef S_IXOTH
+ 
+ 
 #define S_IXOTH  0x01
-#endif
-#ifndef S_IFMT
+ 
+ 
 #define S_IFMT 0170000
-#endif
-#ifndef S_IFREG
+ 
+ 
 #define S_IFREG  0100000
-#endif
-/* --- Filesystem magics used in classifiers. Keep here (BPF only). --- */
-#ifndef PROC_SUPER_MAGIC
+ 
+
+/* --- Filesystem magics used in classifiers. --- */
+ 
 #define PROC_SUPER_MAGIC   0x9fa0UL
-#endif
-#ifndef SYSFS_MAGIC
+
+ 
 #define SYSFS_MAGIC        0x62656572UL
-#endif
-/* /dev is typically devtmpfs (not tmpfs). Define if you rely on it in classifiers. */
-#ifndef DEVTMPFS_MAGIC
+
+/* Mafic for the kernel device system (/dev) */ 
 #define DEVTMPFS_MAGIC     0x1cd1UL   /* value may differ on very old kernels */
-#endif
-#ifndef TMPFS_MAGIC
+
+/*Magic for tmpfs*/
 #define TMPFS_MAGIC        0x01021994UL
-#endif
-#ifndef EXT4_SUPER_MAGIC
-#define EXT4_SUPER_MAGIC   0xEF53
-#endif
-#ifndef XFS_SUPER_MAGIC
-#define XFS_SUPER_MAGIC    0x58465342
-#endif
-#ifndef BTRFS_SUPER_MAGIC
-#define BTRFS_SUPER_MAGIC  0x9123683E
-#endif
-#ifndef CGROUP_SUPER_MAGIC
-#define CGROUP_SUPER_MAGIC     0x27e0eb
-#endif
-#ifndef DEVPTS_SUPER_MAGIC
-#define DEVPTS_SUPER_MAGIC     0x1cd1
-#endif
-#ifndef DEBUGFS_MAGIC
-#define DEBUGFS_MAGIC          0x64626720
-#endif
-#ifndef TRACEFS_MAGIC
-#define TRACEFS_MAGIC          0x74726163
-#endif
-#ifndef SELINUX_MAGIC
-#define SELINUX_MAGIC          0xf97cff8c
-#endif
-#ifndef SECURITYFS_MAGIC
-#define SECURITYFS_MAGIC       0x73636673
-#endif
-#ifndef RAMFS_MAGIC
-#define RAMFS_MAGIC            0x858458f6
-#endif
-#ifndef BPF_FS_MAGIC
-#define BPF_FS_MAGIC           0xcafe4a11
-#endif
-#ifndef F2FS_SUPER_MAGIC
-#define F2FS_SUPER_MAGIC       0xf2f52010
-#endif
-#ifndef EXFAT_SUPER_MAGIC
-#define EXFAT_SUPER_MAGIC      0x2011BAB0
-#endif
-#ifndef NTFS3_SUPER_MAGIC
-#define NTFS3_SUPER_MAGIC      0x5346544e
-#endif
-#ifndef NFS_SUPER_MAGIC
-#define NFS_SUPER_MAGIC        0x6969
-#endif
-#ifndef CIFS_SUPER_MAGIC
-#define CIFS_SUPER_MAGIC       0xff534d42
-#endif
-#ifndef FUSE_SUPER_MAGIC
-#define FUSE_SUPER_MAGIC       0x65735546
-#endif
+
+/*Magic for ext2, ext3, and ext4*/
+#define EXT4_SUPER_MAGIC   0xEF53UL
+
+/*Magic for XFS filesystem*/
+#define XFS_SUPER_MAGIC    0x58465342UL
+
+/*Magic for Btrfs*/
+#define BTRFS_SUPER_MAGIC  0x9123683EUL
+
+/*Mafic for cgroup pseudo-filesystem*/
+#define CGROUP_SUPER_MAGIC     0x27e0ebUL
+
+/*Magic for debugfs*/
+#define DEBUGFS_MAGIC          0x64626720UL
+
+/*Magic for tracefs (separate from debugfs in newer kernels)*/
+#define TRACEFS_MAGIC          0x74726163UL
+
+/*Magic for SELinux pseudo-filesystem*/
+#define SELINUX_MAGIC          0xf97cff8cUL
+
+/*Magic for securityfs (general LSM security hooks)*/
+#define SECURITYFS_MAGIC       0x73636673UL
+
+/*Magic for ramfs*/
+#define RAMFS_MAGIC            0x858458f6UL
+
+/*Magic for the eBPF filesystem*/
+#define BPF_FS_MAGIC           0xcafe4a11UL
+
+/* Magic for Flash-Friendly File System*/
+#define F2FS_SUPER_MAGIC       0xf2f52010UL
+ 
+/* Magic for exFAT */
+#define EXFAT_SUPER_MAGIC      0x2011BAB0UL
+ 
+/* Magic for ntfs3 driver */
+#define NTFS3_SUPER_MAGIC      0x5346544eUL
+ 
+/* Magic for NFS */
+#define NFS_SUPER_MAGIC        0x6969UL
+ 
+/* Magic for CIFS/SMB */
+#define CIFS_SUPER_MAGIC       0xff534d42UL
+ 
+/* Magic for FUSE */
+#define FUSE_SUPER_MAGIC       0x65735546UL
+ 
 
 /* --- Small utilities --- */
 #ifndef LITLEN
@@ -184,15 +182,15 @@ extern struct task_struct *bpf_task_from_pid(s32 pid) __ksym;
 extern void bpf_task_release(struct task_struct *task) __ksym;
 #endif
 
-#ifndef INPL_MIN_WRITES_FLOOR
+ 
 #define INPL_MIN_WRITES_FLOOR 8u       // floor for tiny files
-#endif
-#ifndef INPL_MIN_WRITES_CAP
+ 
+ 
 #define INPL_MIN_WRITES_CAP   4096u    // cap for huge files
-#endif
-#ifndef INPL_MIN_TOTAL_BYTES
+ 
+ 
 #define INPL_MIN_TOTAL_BYTES  (4ULL*1024*1024) // 4 MiB bytes floor before firing
-#endif
+ 
 
 #define LITLEN(lit) ((int)sizeof(lit)-1)
 
@@ -967,7 +965,7 @@ static __always_inline bool is_pseudofs_magic(__u64 m)
     if(m == TMPFS_MAGIC) return true;
     if(m == BPF_FS_MAGIC) return true;
     if(m == CGROUP_SUPER_MAGIC) return true;
-    if(m == DEVPTS_SUPER_MAGIC) return true;
+    if(m == DEVTMPFS_MAGIC) return true;
     if(m == DEBUGFS_MAGIC) return true;
     if(m == TRACEFS_MAGIC) return true;
     if(m == SELINUX_MAGIC) return true;
@@ -1084,40 +1082,6 @@ DETECTING MASS WRITES
 
 */
 
-static __always_inline void mmap_called(const struct file *file)
-{
-    __u32 root = get_root_pid();
-    struct file_id fid = file_id_from_file(file);
-    struct root_file_id_key ik = {.root = root, .id = fid};
-    __u64 now = bpf_ktime_get_ns();
-
-    struct mmap_mark_val *v = bpf_map_lookup_elem(&mmap_marks, &ik);
-    if (!v) {
-        struct mmap_mark_val init = {
-            .first_ns = now,
-            .maps = 1,
-            .fired = 0,
-        };
-        bpf_map_update_elem(&mmap_marks, &ik, &init, BPF_ANY);
-    } else {
-        __sync_fetch_and_add(&v->maps, 1);  // atomic increment
-    }
-}
-
-
-static __always_inline void event_mmap_commit(const struct file *file, int datasync)
-{
-    __u32 root = get_root_pid();
-    struct file_id fid = file_id_from_file(file);
-    struct root_file_id_key ik = {.root = root, .id = fid};
-    struct mmap_mark_val *v = bpf_map_lookup_elem(&mmap_marks, &ik);
-    if (!v) return;
-
-    if (!v->fired) {
-        v->fired = 1;
-        emit_event((__u8)EVENT_MMAP_COMMIT, v->maps, (unsigned int)datasync, 0);
-    }
-}
 
 // For write encryption
 static __always_inline int size_bin(__u64 n)

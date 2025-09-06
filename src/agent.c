@@ -143,15 +143,6 @@ static void emit_service_stop(const struct event_t *e)
            e->arg0);
 }
 
-static void emit_mmap_commit(const struct event_t *e)
-{
-    double ms = e->ts_ns / 1e6;
-    /* flags stores the number of writable+shared mmaps; arg0 is 1 if datasync, else 0 */
-    printf("[%.3f ms] pid=%u tgid=%u root=%u event=%s flags=%u maps=%u, datasync=%u\n",
-           ms,e->p.tid, e->p.tgid, e->p.root_tgid, event_name(e->type),
-           e->event_flags, e->event_flags, e->arg0);
-}
-
 static void emit_encrypt_inplace_dombin(const struct event_t *e)
 {
     double ms = e->ts_ns / 1e6;
@@ -186,9 +177,6 @@ static void emit_event(const struct event_t *e)
         break;
     case EVENT_SERVICE_STOP:
         emit_service_stop(e);
-        break;
-    case EVENT_MMAP_COMMIT:
-        emit_mmap_commit(e);
         break;
     case EVENT_ENCRYPT_INPLACE_DOMBIN:
         emit_encrypt_inplace_dombin(e);

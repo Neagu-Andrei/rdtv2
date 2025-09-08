@@ -204,7 +204,7 @@ static __always_inline __u32 get_tid (void) {
     return (__u32)bpf_get_current_pid_tgid();
 }
 
-// Get root pid for current process (if in container, get container root pid)
+// Get root pid for current process
 static __always_inline __u32 get_root_pid (void) {
     __u32 pid = get_tgid();
     __u32 *root_pid =  bpf_map_lookup_elem(&root_pid_of, &pid);
@@ -214,14 +214,52 @@ static __always_inline __u32 get_root_pid (void) {
     return pid;
 }
 
+// Get cgroup id for current process
+static __always_inline __u64 get_cgroup_id(void)
+{
+    return bpf_get_current_cgroup_id();
+}
+
+static __always_inline __u64 cgroup_to_id(struct cgroup *dst)
+{
+    // Each cgroup has a kernfs_node representing its directory in /sys/fs/cgroup
+    struct kernfs_node *kn = BPF_CORE_READ(dst, kn);
+    if (!kn) return 0;
+
+    // On modern kernels, kernfs_node has a stable 'id' field (64-bit, unique for the node).
+    __u64 id = BPF_CORE_READ(kn, id);
+
+    // Return that as the cgroup’s unique identifier.
+    return id;
+}
+
+
+static __always_inline __u32 get_root_pid_of (__u32 tgid) {
+    __u32 *root_pid =  bpf_map_lookup_elem(&root_pid_of, &tgid);
+    if (root_pid) {
+        return *root_pid;
+    }
+    return tgid;
+}
+
 // Setter for process id
 static __always_inline void fill_proc_ids(struct proc_ids *out)
 {
     out->tgid = get_tgid();
     out->tid  = get_tid();
     out->root_tgid = get_root_pid();
+    out->cgroup_id = get_cgroup_id();
     out->_pad = 0;
 }
+
+
+static __always_inline bool is_cgroup_whitelisted(__u64 cgrp_id)
+{
+    if (!cgrp_id) return false;
+    __u8 *w = bpf_map_lookup_elem(&cgroup_whitelist, &cgrp_id);
+    return w && *w;
+}
+
 
 
 // static __always_inline bool is_watched_root(void){
@@ -305,6 +343,7 @@ static __always_inline struct file_id file_id_from_path(const struct path *path)
 }
 
 
+
 /* 
 Checks if the first slen bits of s are the same as lit
 */
@@ -343,30 +382,9 @@ static __always_inline bool str_equals( const char* s, int slen, const char* lit
 //     return val && *val;
 // }
 
-// static __always_inline bool is_under_protected_dir(struct dentry *d, struct super_block *sb)
-// {
-//     if (!d || !sb) return false;
-//     __u32 dev = device_id_from_superblock(sb);
-
-// #pragma unroll
-//     for (int i = 0; i < 32; i++) {
-//         struct inode *in = BPF_CORE_READ(d, d_inode);
-//         __u64 ino = in ? BPF_CORE_READ(in, i_ino) : 0;
-
-//         struct file_id key = {.device_id = dev, .inode = ino};
-//         if (bpf_map_lookup_elem(&protected_dirs, &key))
-//             return true;
-
-//         struct dentry *parent = BPF_CORE_READ(d, d_parent);
-//         if (!parent || parent == d) break;
-//         d = parent;
-//     }
-//     return false;
-// }
-
 /* EMITS*/
 
-static __always_inline void emit_event(__u8 type, __u32 flags,  __u32 a0, __u32 a1)
+static __always_inline void emit_event(__u8 type, __u32 flags,  __u64 a0, __u64 a1)
 {
     struct event_t *e = RINGBUF_RESERVE_OR_DROP(events, struct event_t, DROP_BUFFER_EVENT);
     if (!e) return;
@@ -1187,4 +1205,55 @@ static __always_inline void inpl_update_on_write(const struct file *file, ssize_
     }
 }
 
+
+/*
+
+DETECTING CONTROL GROUP MOVES
+
+*/
+
+static __always_inline bool detect_cgroup_move_for(__u32 tgid, __u64 curr_id, __u64 *prev_out, __u32 *flags_out)
+{
+    if (flags_out) *flags_out = 0;
+    if (prev_out)  *prev_out  = 0;
+
+    if (!tgid) return false;
+
+    __u64 *prevp = bpf_map_lookup_elem(&last_cgroup_by_tgid, &tgid);
+    if (prevp) {
+        __u64 prev = *prevp;
+        if (prev != curr_id) {
+            bpf_map_update_elem(&last_cgroup_by_tgid, &tgid, &curr_id, BPF_ANY);
+            if (flags_out && is_cgroup_whitelisted(curr_id)) *flags_out |= FLAG_MOVED_TO_WHITELISTED_CGROUP;
+            if (prev_out) *prev_out = prev;
+            // Only emit "move" if both are non-zero (v2) to avoid v1 noise
+            return (prev != 0 && curr_id != 0);
+        }
+        if (prev_out) *prev_out = prev;
+        return false; // unchanged
+    } else {
+        // First time we ever see this TGID; record current id
+        bpf_map_update_elem(&last_cgroup_by_tgid, &tgid, &curr_id, BPF_ANY);
+
+        // Emit only if destination is a whitelisted cgroup (and non-zero)
+        if (curr_id != 0 && is_cgroup_whitelisted(curr_id)) {
+            if (flags_out) *flags_out |= FLAG_FIRST_TIME_MOVED_TO_CGROUP | FLAG_MOVED_TO_WHITELISTED_CGROUP;
+            if (prev_out)  *prev_out  = 0;    // no previous id
+            return true;  // emit EVENT_CGROUP_MOVE with the flag set
+        }
+        return false; // silently seed state
+    }
+}
+
+static __always_inline void detect_cgroup_move(void)
+{
+    struct proc_ids id = {};
+    fill_proc_ids(&id);
+
+    __u64 prev = 0;
+    __u32 flags = 0;
+    if (detect_cgroup_move_for(id.tgid, id.cgroup_id, &prev, &flags)) {
+        emit_event(EVENT_CGROUP_MOVE, flags, prev, id.cgroup_id);
+    }
+}
 

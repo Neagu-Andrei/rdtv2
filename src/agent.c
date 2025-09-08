@@ -44,6 +44,7 @@ static const char *event_name(__u8 t)
     case 105:  return "EVENT_DATA_FOR_IMPACT";
     case 106:  return "EVENT_MMAP_COMMIT";
     case 107: return "EVENT_ENCRYPT_INPLACE_DOMBIN";
+    case 108: return "EVENT_CGROUP_MOVE";
     default: return "EVENT";
     }
 }
@@ -102,6 +103,15 @@ static char *event_flags_to_string(uint8_t type, uint32_t flags)
         if (flags & TARGET_OTHER_CRITICAL) strncat(buf, "other_critical, ", sizeof buf - strlen(buf) - 1);
         break;
     }
+    case EVENT_CGROUP_MOVE: {
+        if (!flags) {
+            snprintf(buf, sizeof buf, "none");
+            break;
+        }
+        /* channels */
+        if (flags & FLAG_MOVED_TO_WHITELISTED_CGROUP)  strncat(buf, "to a whitelisted cgroup", sizeof buf - strlen(buf) - 1);
+        if (flags & FLAG_FIRST_TIME_MOVED_TO_CGROUP)   strncat(buf, "first", sizeof buf - strlen(buf) - 1);
+    }
     default:
         /* Unknown or unsupported event type: dump the raw value */
         snprintf(buf, sizeof buf, "0x%x", flags);
@@ -137,7 +147,7 @@ static void emit_service_stop(const struct event_t *e)
 {
     double ms = e->ts_ns / 1e6;
     /* e->event_flags encodes channels/effects/targets; arg0 holds the PID we signalled. */
-    printf("[%.3f ms] pid=%u tgid=%u root=%u event=%s flags=%s at pid %u\n",
+    printf("[%.3f ms] pid=%u tgid=%u root=%u event=%s flags=%s at pid %llu\n",
            ms, e->p.tid, e->p.tgid, e->p.root_tgid, event_name(e->type),
            event_flags_to_string(e->type, e->event_flags),
            e->arg0);
@@ -151,16 +161,24 @@ static void emit_encrypt_inplace_dombin(const struct event_t *e)
     unsigned dom_idx = (e->arg1 >> 16) & 0xffffu;
     unsigned nbins   = e->arg1 & 0xffffu;
     printf("[%.3f ms] pid=%u tgid=%u root=%u event=%s flags=%u "
-           "args=[writes=%u, max_bin=%u, dom_idx=%u/%u]\n",
+           "args=[writes=%u, max_bin=%llu, dom_idx=%u/%u]\n",
            ms,e->p.tid, e->p.tgid, e->p.root_tgid, event_name(e->type),
            e->event_flags,
            e->event_flags, e->arg0, dom_idx, nbins);
 }
 
+static void emit_cgroup_change(const struct event_t *e)
+{
+    double ms = e->ts_ns / 1e6;
+    printf("[%.3f ms] pid=%u tgid=%u root=%u event=%s context=[%s]"
+           "from %llu to %llu\n",
+           ms,e->p.tid, e->p.tgid, e->p.root_tgid, event_name(e->type),event_flags_to_string(e->type, e->event_flags), e->arg0, e->arg1);
+}
+
 static void emit_generic(const struct event_t *e)
 {
     double ms = e->ts_ns / 1e6;
-    printf("[%.3f ms] pid=%u tgid=%u root=%u event=%s flags=0x%x args=[%u,%u]\n",
+    printf("[%.3f ms] pid=%u tgid=%u root=%u event=%s flags=0x%x args=[%llu,%llu]\n",
            ms,e->p.tid, e->p.tgid, e->p.root_tgid, event_name(e->type),
            e->event_flags, e->arg0, e->arg1);
 }
@@ -180,6 +198,9 @@ static void emit_event(const struct event_t *e)
         break;
     case EVENT_ENCRYPT_INPLACE_DOMBIN:
         emit_encrypt_inplace_dombin(e);
+        break;
+    case EVENT_CGROUP_MOVE:
+        emit_cgroup_change(e);
         break;
     default:
         /* Unknown or unimplemented event type */

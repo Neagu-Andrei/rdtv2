@@ -187,3 +187,27 @@ struct {
     __type(key, struct root_file_id_key);
     __type(value, struct inpl_stats);
 } inpl_map SEC(".maps");
+
+
+/* Whitelisting by control group */
+
+/* 
+    We can implement whitelisting by control group to differentiate between processes
+    A problem might arise where a process could jump from a control group to another, which is rare in benign applications
+    Then we want to emmit an event
+*/
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 8192);
+    __type(key, __u64);     //cgroup_id
+    __type(value, __u8);    //dummy
+} cgroup_whitelist SEC(".maps");
+
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 65536);
+    __type(key, __u32);     //tgid
+    __type(value, __u64);   //last cgroup_id
+} last_cgroup_by_tgid SEC(".maps");

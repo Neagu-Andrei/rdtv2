@@ -42,6 +42,7 @@ int BPF_PROG(tpbtf_exit, struct task_struct *p, long code)
 {
     __u32 tgid = BPF_CORE_READ(p, tgid);
     (void)bpf_map_delete_elem(&root_pid_of, &tgid);
+    (void)bpf_map_delete_elem(&last_cgroup_by_tgid, &tgid);
     return 0;
 }
 
@@ -326,6 +327,7 @@ int exit_kill(struct trace_event_raw_sys_exit *ctx)
 SEC("fexit/security_file_open")
 int BPF_PROG(exit_security_file_open, struct file *file, int ret)
 {
+    detect_cgroup_move();
     /* Only act on successful opens */
     if (ret) return 0;
 
@@ -347,39 +349,6 @@ int BPF_PROG(exit_security_file_open, struct file *file, int ret)
     return 0;
 }
 
-// SEC("lsm/mmap_file")
-// int BPF_PROG(on_mmap_file, struct file *file, unsigned long reqprot, unsigned long prot, unsigned long flags, unsigned long addr, unsigned long addr_only)
-// {
-//     if (!file) return 0;
-
-//     bool writable = (prot & PROT_WRITE) != 0;
-//     bool shared   = (flags & MAP_SHARED) != 0;
-//     if (!(writable && shared)) return 0;
-
-//     mmap_called(file);
-//     return 0;
-// }<s
-
-// // do_fsync(struct file *file, loff_t start, loff_t end, int datasync) -> int
-// SEC("fexit/do_fsync")
-// int BPF_PROG(x_do_fsync, struct file *file, int datasync, int ret)
-// {
-//     if (ret < 0 || !file) return 0;
-//     event_mmap_commit(file, datasync);
-//     return 0;
-// }
-
-// // fdatasync(struct file *) may route here on some kernels:
-// // fexit/fdatasync or fexit/vfs_fsync_range are also viable.
-// // vfs_fsync_range(file, start, end, datasync) -> int
-// SEC("fexit/vfs_fsync_range")
-// int BPF_PROG (x_vfs_fsync_range, struct file *file, loff_t start, loff_t end, int datasync, int ret)
-// {
-//     if (ret < 0 || !file) return 0;
-//     event_mmap_commit(file, datasync);
-//     return 0;
-// }
-
 // vfs_write(file, buf, count, pos) -> ssize_t
 SEC("fexit/vfs_write")
 int BPF_PROG(exit_vfs_write,
@@ -389,6 +358,7 @@ int BPF_PROG(exit_vfs_write,
              loff_t *pos,
              long ret)
 {
+    detect_cgroup_move();
     if (ret > 0) inpl_update_on_write(file, ret);
     return 0;
 }
@@ -397,15 +367,38 @@ int BPF_PROG(exit_vfs_write,
 SEC("fexit/vfs_writev")
 int BPF_PROG( exit_vfs_writev, struct file *file, const struct iovec *iov, unsigned long vlen, loff_t *pos, ssize_t ret)
 {
+    detect_cgroup_move();
     if (ret > 0) inpl_update_on_write(file, ret);
     return 0;
 }
 
-// SEC("lsm/bprm_check_security")
-// int BPF_PROG(x_bprm_check, struct linux_binprm *bprm)
-// {
-//     struct file *f = BPF_CORE_READ(bprm, file);
-//     if (!f) return 0;
-//     // bprm_check_set_sysinfo_flag(f);
-//     return 0;
-// }
+SEC("fentry/cgroup_attach_task")
+int BPF_PROG(fe_cgroup_attach_task, struct task_struct *task, struct cgroup *dst)
+{
+    __u32 tgid   = BPF_CORE_READ(task, tgid);
+    __u32 pid    = BPF_CORE_READ(task, pid);
+    __u32 root_p = get_root_pid_of(tgid);
+    __u64 dstid  = cgroup_to_id(dst);
+    if (!tgid || !dstid) return 0; // v1 or unexpected
+
+    __u64 prev = 0;
+    __u32 flag   = 0;
+    if (detect_cgroup_move_for(tgid, dstid, &prev, &flag)) {
+        struct event_t *e = RINGBUF_RESERVE_OR_DROP(events, struct event_t, DROP_BUFFER_EVENT);
+        if (!e) return 0;
+
+        e->ts_ns         = bpf_ktime_get_ns();
+        e->p.tid         = pid;
+        e->p.tgid        = tgid;
+        e->p.root_tgid   = root_p;
+        e->p.cgroup_id   = dstid;
+        e->type          = EVENT_CGROUP_MOVE;
+        e->event_flags   = flag;
+        e->_pad8         = 0;
+        e->arg0          = prev;           // previous cgroup id (0 if first seen)
+        e->arg1          = dstid;          // new cgroup id
+
+        bpf_ringbuf_submit(e, 0);
+    }
+    return 0;
+}

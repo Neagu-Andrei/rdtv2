@@ -67,6 +67,7 @@ enum event_type {
     EVENT_MASS_WRITE = 104,
     EVENT_DATA_FOR_IMPACT = 105,
     EVENT_ENCRYPT_INPLACE_DOMBIN = 107,
+    EVENT_CGROUP_MOVE = 108,
 }; 
 
 
@@ -81,49 +82,10 @@ enum event_type {
 //     AUX_PROT_DIR     = 1u << 6,  /* op hit a protected directory */
 // };
 
-// enum pattern_flags{
-//     PF_NONE                = 0,
-
-//     /* Crypto / preparation */
-//     PF_RNG_USED            = (1u << 0),  /* /dev/urandom or getrandom() */
-//     PF_OPENSSL_LIKE_LOAD   = (1u << 1),  /* e.g., loads of reads from /proc/sys/ * /random or libcrypto files (optional) */
-
-//     /* Staging / stealthy file creation */
-//     PF_TMP_USED            = (1u << 2),  /* O_TMPFILE or writes in /tmp,/var/tmp,/dev/shm */
-//     PF_TMPFS_WRITE         = (1u << 3),  /* writes on tmpfs/ramfs mounts (fast staging) */
-
-//     /* Write mechanics */
-//     PF_MMAP_WRITE          = (1u << 4),  /* mmap(PROT_WRITE) + actual dirtying */
-//     PF_MSYNC_USED          = (1u << 5),  /* msync/sync_file_range after mmaps */
-//     PF_FALLOCATE_USED      = (1u << 6),  /* preallocate target size */
-//     PF_FTRUNCATE_USED      = (1u << 7),  /* truncate to target size */
-
-//     /* Rename/link tricks */
-//     PF_RENAME_EXCHANGE     = (1u << 8),  /* renameat2(..., RENAME_EXCHANGE) */
-//     PF_RENAME_NOREPLACE    = (1u << 9),  /* renameat2(..., RENAME_NOREPLACE) */
-//     PF_LINK_TRICKS         = (1u << 10), /* hardlink/linkat patterns around encrypt/swap */
-
-//     /* Volume/shape signals */
-//     PF_PARALLEL_ENCRYPT    = (1u << 11), /* concurrent writes to many distinct files */
-//     PF_NEW_EXTENSIONS      = (1u << 12), /* sudden creation of unknown extensions (.lock, .bert, etc.) */
-//     PF_SYSCALL_FLOOD       = (1u << 13), /* high-rate syscalls causing drops/backpressure */
-
-//     /* Reconnaissance / environment manipulation */
-//     PF_PROC_ENUM           = (1u << 14), /* scanning /proc, /proc/ * /maps, procfs scraping */
-//     PF_PROC_KILL_ATTEMPT   = (1u << 15), /* signals to other processes (SIGKILL/SIGTERM bursts) */
-//     PF_ESXI_PROBE          = (1u << 16), /* probing for ESXi/VMware paths or services */
-//     PF_NET_SHARE_TOUCH     = (1u << 17), /* SMB/NFS paths (//host/share, /mnt/nfs, cifs mounts) */
-
-//     /* Tamper with defenses / persistence */
-//     PF_BPF_OPS_ATTEMPT     = (1u << 18), /* bpf() syscalls (load/attach/map ops) by unknown lineage */
-//     PF_MOUNT_TAMPER        = (1u << 19), /* remounts, bind mounts to bypass protections */
-//     PF_CANARY_TOUCHED      = (1u << 20), /* interacted with a planted canary */
-
-//     /* Reserve some headroom for future signals */
-//     PF_VM_PROBE          = (1u << 21), /* probing to check for VM artifacts */
-//     PF_HW_PROBE          = (1u << 22), /*hardware reads (/proc/cpuinfo, /proc/meminfo, /sys/class/dmi/id/*)*/
-//     PF_HOSTNAME_CHECK    = (1u << 23), /**/
-// };
+enum cgroup_move{
+    FLAG_MOVED_TO_WHITELISTED_CGROUP = (1u << 0),
+    FLAG_FIRST_TIME_MOVED_TO_CGROUP = (1u << 1),
+};
 
 enum pattern_flag_system_discovery{
     // FLAGS FOR PROCESS DISCOVERY
@@ -177,6 +139,7 @@ struct proc_ids {
     __u32 root_tgid;  /* lineage root (from root_pid_of map) */
     __u32 tgid;       /* process (thread-group) id */
     __u32 tid;        /* thread id */
+    __u64 cgroup_id;  /* cgroup id */
     __u32 _pad;       /* explicit pad -> struct size 16B, 8B-aligned embedding */
 };
 
@@ -211,8 +174,8 @@ struct event_t {
     __u32  event_flags;     /* flags based on the events */
 
     /* Small op-specific integers (don’t bloat the record) */
-    __u32 arg0;            /* e.g., bytes (write), flags (renameat2), prot (mmap/mprotect), bpf cmd */
-    __u32 arg1;            /* e.g., fd (write), dir-hash, msync/sfr flags, etc. */
+    __u64 arg0;            /* e.g., bytes (write), flags (renameat2), prot (mmap/mprotect), bpf cmd */
+    __u64 arg1;            /* e.g., fd (write), dir-hash, msync/sfr flags, etc. */
 };
 
 // struct syscall_t {

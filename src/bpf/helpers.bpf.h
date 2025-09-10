@@ -2,10 +2,10 @@
 
 #include <bpf/bpf_core_read.h>
 
-#include "../../include/vmlinux.h"
+#include "vmlinux.h"
 
 #include "maps.bpf.h"
-#include "../rdts_uapi.h"
+#include "rdts_uapi.h"
 
 /* --- Access mode / open flags  --- */
  
@@ -193,6 +193,12 @@ extern void bpf_task_release(struct task_struct *task) __ksym;
  
 
 #define LITLEN(lit) ((int)sizeof(lit)-1)
+
+#define SUSPICIOUS_EVENTS_MASK (BIT_SYSINFO_DISCOVERY | BIT_PROCESS_DISCOVERY | BIT_SERVICE_STOP | BIT_OPEN_HOST_DATA)
+
+
+static __always_inline void mark_event_and_escalate(__u32 root, __u8 evt_type, __u32 evt_flags);
+
 
 // Get current task's Thread Group ID (TGID)
 static __always_inline __u32 get_tgid (void) {
@@ -400,29 +406,7 @@ static __always_inline void emit_event(__u8 type, __u32 flags,  __u64 a0, __u64 
     bpf_ringbuf_submit(e, 0);
 }
 
-// static __always_inline void emit_syscalls( __s32 nr, __s32 ret, __s32 fd, __u32 flags, __u64 len)
-// {
-//     if (!is_watched_root()) return;
 
-//     struct syscall_t *s = RINGBUF_RESERVE_OR_DROP(syscalls, struct syscall_t, DROP_BUFFER_SYSCALL);
-//     if(!s) return;
-
-//     s->ts_ns = bpf_ktime_get_ns();
-//     fill_proc_ids(&s->p);
-//     s->nr = nr;
-//     s->ret = ret;
-//     s->fd = fd;
-//     s->flags = flags;
-//     s->len = len;
-
-
-//     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-//     const char *task_comm = BPF_CORE_READ(task, comm);
-//     bpf_core_read_str(&s->comm, sizeof(s->comm), task_comm);
-    
-//     bpf_ringbuf_submit(s, 0);
-
-// }
 
 // /* LSM GUARDS*/
 
@@ -526,6 +510,7 @@ static __always_inline void proc_map_bump (__u32 root)
     if (opens == 100)   //hard coded might need modifications
     {
         emit_event((__u8)EVENT_PROCESS_DISCOVERY, 0, 0, 0);
+        mark_event_and_escalate(root, EVENT_PROCESS_DISCOVERY, 0);
         return;
     }
     
@@ -748,6 +733,7 @@ static __always_inline void set_sysinfo_flag(const struct file *f)
         __u32 updated = old | bits;
         bpf_map_update_elem(&sys_discovery_flags, &root, &updated, BPF_ANY);
         emit_event((__u8)EVENT_SYSINFO_DISCOVERY, updated, added, 0);
+        mark_event_and_escalate(root, EVENT_SYSINFO_DISCOVERY, 0);
     }
 }
 
@@ -810,6 +796,7 @@ static __always_inline void bprm_check_set_sysinfo_flag(const struct file *f)
     if ((add & ~old) != 0) {
         bpf_map_update_elem(&sys_discovery_flags, &root, &updated, BPF_ANY);
         emit_event((__u8)EVENT_SYSINFO_DISCOVERY, updated, add, 0);
+        mark_event_and_escalate(root, EVENT_SYSINFO_DISCOVERY, 0);
     }
 }
 
@@ -820,23 +807,23 @@ static __always_inline void bprm_check_set_sysinfo_flag(const struct file *f)
     and on success return the length of dst. Else 0
     We mainly use it on openat/rename (paths), on connect (AF_UNIX) (sun_path) or to snapshot argv[i] for execve
 */
-static __always_inline int stash_path_args(const struct argstash_t *st, int arg_idx, char *dst, int len)
-{
-    __u64 raw = st->args[arg_idx];
-    const char *up = (const char *)(unsigned long)raw;
+// static __always_inline int stash_path_args(const struct argstash_t *st, int arg_idx, char *dst, int len)
+// {
+//     __u64 raw = st->args[arg_idx];
+//     const char *up = (const char *)(unsigned long)raw;
 
-    if (!up) {
-        if (len) dst[0] = 0;
-        return 0;
-    }
+//     if (!up) {
+//         if (len) dst[0] = 0;
+//         return 0;
+//     }
 
-    int n = bpf_probe_read_user_str(dst, len, up);
-    if (n < 0) {
-        if (len) dst[0] = 0;
-        return 0;
-    }
-    return n;
-}
+//     int n = bpf_probe_read_user_str(dst, len, up);
+//     if (n < 0) {
+//         if (len) dst[0] = 0;
+//         return 0;
+//     }
+//     return n;
+// }
 
 // SERVICE STOP T1489
 
@@ -1090,6 +1077,8 @@ static __always_inline void event_open_host_data(const struct file *file)
     {
         emit_event((__u8)EVENT_OPEN_HOST_DATA, 0, 0, 0); // to add flags and arguments
         // we need to implement so we don't trigger the event every time it exceeds the treshlod
+        mark_event_and_escalate(root, EVENT_OPEN_HOST_DATA, 0);
+        
     }
 }
 
@@ -1200,7 +1189,7 @@ static __always_inline void inpl_update_on_write(const struct file *file, ssize_
     // Dominance: maxc / N > 0.5  <=>  2*maxc > N
     if ((maxc << 1) > N) {
         st->fired = 1;
-        emit_event((__u8)EVENT_ENCRYPT_INPLACE_DOMBIN,
+        emit_event((__u8)EVENT_DATA_FOR_IMPACT,
                    N, maxc, (dom_idx << 16) | INPL_NBINS);
     }
 }
@@ -1214,35 +1203,39 @@ DETECTING CONTROL GROUP MOVES
 
 static __always_inline bool detect_cgroup_move_for(__u32 tgid, __u64 curr_id, __u64 *prev_out, __u32 *flags_out)
 {
-    if (flags_out) *flags_out = 0;
+       if (flags_out) *flags_out = 0;
     if (prev_out)  *prev_out  = 0;
-
     if (!tgid) return false;
 
     __u64 *prevp = bpf_map_lookup_elem(&last_cgroup_by_tgid, &tgid);
-    if (prevp) {
-        __u64 prev = *prevp;
-        if (prev != curr_id) {
-            bpf_map_update_elem(&last_cgroup_by_tgid, &tgid, &curr_id, BPF_ANY);
-            if (flags_out && is_cgroup_whitelisted(curr_id)) *flags_out |= FLAG_MOVED_TO_WHITELISTED_CGROUP;
-            if (prev_out) *prev_out = prev;
-            // Only emit "move" if both are non-zero (v2) to avoid v1 noise
-            return (prev != 0 && curr_id != 0);
-        }
-        if (prev_out) *prev_out = prev;
-        return false; // unchanged
-    } else {
-        // First time we ever see this TGID; record current id
+    if (!prevp) {
+        // First sighting → seed baseline only; do NOT emit a move.
         bpf_map_update_elem(&last_cgroup_by_tgid, &tgid, &curr_id, BPF_ANY);
-
-        // Emit only if destination is a whitelisted cgroup (and non-zero)
-        if (curr_id != 0 && is_cgroup_whitelisted(curr_id)) {
-            if (flags_out) *flags_out |= FLAG_FIRST_TIME_MOVED_TO_CGROUP | FLAG_MOVED_TO_WHITELISTED_CGROUP;
-            if (prev_out)  *prev_out  = 0;    // no previous id
-            return true;  // emit EVENT_CGROUP_MOVE with the flag set
-        }
-        return false; // silently seed state
+        return false;
     }
+
+    __u64 prev = *prevp;
+    if (prev_out) *prev_out = prev;
+
+    if (prev == curr_id) {
+        // No change
+        return false;
+    }
+
+    // Genuine transition: update first
+    bpf_map_update_elem(&last_cgroup_by_tgid, &tgid, &curr_id, BPF_ANY);
+
+    // Only treat as a move if both IDs are nonzero (avoid v1 noise)
+    if (prev == 0 || curr_id == 0) return false;
+
+    // Flag only if the transition is non-WL → WL
+    bool was_wl = is_cgroup_whitelisted(prev);
+    bool now_wl = is_cgroup_whitelisted(curr_id);
+    if (flags_out && !was_wl && now_wl) {
+        *flags_out |= FLAG_MOVED_TO_WHITELISTED_CGROUP;
+    }
+
+    return true; // caller will emit EVENT_CGROUP_MOVE
 }
 
 static __always_inline void detect_cgroup_move(void)
@@ -1254,6 +1247,277 @@ static __always_inline void detect_cgroup_move(void)
     __u32 flags = 0;
     if (detect_cgroup_move_for(id.tgid, id.cgroup_id, &prev, &flags)) {
         emit_event(EVENT_CGROUP_MOVE, flags, prev, id.cgroup_id);
+        mark_event_and_escalate(id.root_tgid, EVENT_CGROUP_MOVE, flags);
     }
 }
 
+/*
+    HELPERS FOR ESCALATION WHEN MULTIPLE EVENTS ARE HIT BY THE SAME ROOT_PID 
+*/
+
+static __always_inline bool root_is_escalated(__u32 root) {
+    struct root_state *st = bpf_map_lookup_elem(&root_states, &root);
+    return st && st->escalated == RT_ESCALATED;
+}
+
+//bit-twiddling hack from Hacker’s Delight
+static __always_inline int popcnt8(__u8 x) {
+    x = x - ((x >> 1) & 0x55);
+    x = (x & 0x33) + ((x >> 2) & 0x33);
+    return (int)((x + (x >> 4)) & 0x0F);
+}
+
+// returns the root state for a given root
+static __always_inline struct root_state *get_or_init_root_state(__u32 root) {
+    struct root_state *st = bpf_map_lookup_elem(&root_states, &root);
+    if (st) return st;
+    struct root_state init = {};
+    init.first_event_ns = bpf_ktime_get_ns();
+    bpf_map_update_elem(&root_states, &root, &init, BPF_ANY);
+    return bpf_map_lookup_elem(&root_states, &root);
+}
+
+// return the new cat_bits after marking and updates root_states map
+static __always_inline void mark_event_and_escalate(__u32 root, __u8 event, __u32 flag)
+{
+    struct root_state *st = get_or_init_root_state(root);
+    if (!st) return;
+    struct root_state update = {};
+    update.last_event_ns = bpf_ktime_get_ns();
+    update.first_event_ns = st->first_event_ns;
+    update.cat_bits = st->cat_bits;
+
+    if (event == EVENT_SYSINFO_DISCOVERY) {
+         update.cat_bits |= BIT_SYSINFO_DISCOVERY;
+    } else if (event == EVENT_PROCESS_DISCOVERY) {
+         update.cat_bits |= BIT_PROCESS_DISCOVERY;
+    } else if (event == EVENT_SERVICE_STOP) {
+         update.cat_bits |= BIT_SERVICE_STOP;
+    } else if (event == EVENT_OPEN_HOST_DATA) {
+         update.cat_bits |= BIT_OPEN_HOST_DATA;
+    } else if (event == EVENT_CGROUP_MOVE) {
+        if (flag & FLAG_MOVED_TO_WHITELISTED_CGROUP)
+             update.cat_bits |= BIT_MOVED_TO_WHITELISTED_CGROUP;
+    }
+
+    if(popcnt8(update.cat_bits & SUSPICIOUS_EVENTS_MASK) >= 2 || (update.cat_bits & BIT_MOVED_TO_WHITELISTED_CGROUP))
+    {
+        update._pad = 0;
+        if(st->escalated == RT_NOT_ESCALATED)
+        {
+            update.escalated = RT_ESCALATED;
+            emit_event(EVENT_ESCALATE_ROOT, update.cat_bits, update.first_event_ns , update.last_event_ns);
+        }else{
+            update.escalated = RT_ESCALATED;
+        }
+        bpf_map_update_elem(&root_states, &root, &update, BPF_ANY);
+        return;   
+    }else{
+        update.escalated = st->escalated;
+        update._pad = 0;
+        bpf_map_update_elem(&root_states, &root, &update, BPF_ANY);
+        return;
+    }
+}
+
+
+/*
+ FOR EMITING RAW SYSCALLS
+*/
+
+
+static __always_inline int snap_user_str(const void *user_p, char *dst, int maxlen)
+{
+    // Returns bytes copied (<= maxlen). 0 means error or empty.
+    int n = bpf_probe_read_user_str(dst, maxlen, user_p);
+    if (n < 0) return 0;
+    if (n > maxlen) n = maxlen; // truncated case
+    return n;
+}
+
+// capture up to two path-like args by positional index from s->args[]
+static __always_inline void capture_paths_by_index(struct argstash_t *s, int idx0, int idx1)
+{
+    if (idx0 >= 0) s->path0_len = (__u16)snap_user_str((const void*)s->args[idx0], s->path0, MAX_PATH_LEN);
+    if (idx1 >= 0) s->path1_len = (__u16)snap_user_str((const void*)s->args[idx1], s->path1, MAX_PATH_LEN);
+}
+
+// // ENTER: store args + ts + paths (if tracked)
+// static __always_inline void stash_enter(
+//     const struct bpf_raw_tracepoint_args *ctx,
+//     __u32 root, __u32 tgid, __u32 pid)
+// {
+//     if (!root_is_escalated(root)) return;
+
+//     __u32 nr = read_syscall_nr_raw(ctx);
+//     if (!is_tracked_syscall(nr)) return;
+
+//     struct argstash_t s = {};
+//     s.enter_ts_ns = bpf_ktime_get_ns();
+//     s.sys_nr      = (__u32)nr;
+
+//     __u64 a[6] = {};
+//     read_syscall_args_raw(ctx, a);
+//     #pragma unroll
+//     for (int i = 0; i < 6; i++)
+//         s.args[i] = a[i];
+
+//     capture_path_snapshots(nr, &s);
+
+//     bpf_map_update_elem(&argstash_raw, &pid, &s, BPF_ANY);
+
+//     // Special-case: successful execve*/ doesn’t have sys_exit → emit ENTER now
+// #if defined(__NR_execve) || defined(__NR_execveat)
+//     if (nr == __NR_execve
+//     #ifdef __NR_execveat
+//         || nr == __NR_execveat
+//     #endif
+//        ) {
+//         struct syscall_t *e =
+//             bpf_ringbuf_reserve(&syscalls, sizeof(*e), 0);
+//         if (!e) return;
+
+//         e->ts_ns     = s.enter_ts_ns;
+//         e->cgroup_id = bpf_get_current_cgroup_id();
+//         e->root_pid  = root;
+//         e->tgid      = tgid;
+//         e->pid       = pid;
+//         e->sys_nr    = s.sys_nr;
+//         e->phase     = RAW_ENTER;
+//         e->arg_count = 4;
+//         bpf_get_current_comm(e->comm, sizeof(e->comm));
+//         e->a0 = s.args[0]; e->a1 = s.args[1]; e->a2 = s.args[2]; e->a3 = s.args[3];
+//         e->path0_len = s.path0_len; e->path1_len = s.path1_len;
+
+// #pragma unroll
+//         for (int i = 0; i < MAX_PATH_LEN; i++) e->path0[i] = s.path0[i];
+// #pragma unroll
+//         for (int i = 0; i < MAX_PATH_LEN; i++) e->path1[i] = s.path1[i];
+
+//         e->ret = 0;
+//         e->duration_ns = 0;
+//         bpf_ringbuf_submit(e, 0);
+//     }
+// #endif
+// }
+
+// // EXIT: merge stash + ret (+duration), emit one consolidated record
+// static __always_inline void emit_exit( const struct bpf_raw_tracepoint_args *ctx, __u32 root, __u32 tgid, __u32 pid)
+// {
+//     if (!root_is_escalated(root)) return;
+
+//     struct argstash_t *sv = bpf_map_lookup_elem(&argstash_raw, &pid);
+//     if (!sv) return; // nothing to emit
+//     __u32 nr = sv->sys_nr;
+//     if (!is_tracked_syscall(nr)) return; 
+
+//     // __u32 nr = ctx->args[0];
+
+//     // struct argstash_t *sv = bpf_map_lookup_elem(&argstash_raw, &pid);
+
+//     struct syscall_t *e = RINGBUF_RESERVE_OR_DROP(syscalls, struct syscall_t, DROP_BUFFER_SYSCALL);
+//     if (!e) return;
+
+//     __u64 now = bpf_ktime_get_ns();
+
+//     fill_proc_ids(&e->p);
+//     e->sys_nr    = (__u32)nr;
+//     bpf_get_current_comm(e->comm, sizeof(e->comm));
+//     e->ret = (__s64)ctx->args[1];
+
+//     if (sv && sv->sys_nr == (__u16)nr) {
+//         e->ts_ns      = sv->enter_ts_ns;
+//         e->arg_count  = 4;
+//         e->a0 = sv->args[0]; e->a1 = sv->args[1];
+//         e->a2 = sv->args[2]; e->a3 = sv->args[3];
+//         e->path0_len  = sv->path0_len;
+//         e->path1_len  = sv->path1_len;
+
+// #pragma unroll
+//         for (int i = 0; i < MAX_PATH_LEN; i++) e->path0[i] = sv->path0[i];
+// #pragma unroll
+//         for (int i = 0; i < MAX_PATH_LEN; i++) e->path1[i] = sv->path1[i];
+
+//         e->duration_ns = now - sv->enter_ts_ns;
+
+//         bpf_map_delete_elem(&argstash_raw, &pid);
+//     } else {
+//         // Fallback (rare): no stash found → emit minimal EXIT
+//         e->ts_ns     = now;
+//         e->arg_count = 0;
+//         e->a0 = e->a1 = e->a2 = e->a3 = 0;
+//         e->path0_len = e->path1_len = 0;
+// #pragma unroll
+//         for (int i = 0; i < MAX_PATH_LEN; i++) e->path0[i] = 0;
+// #pragma unroll
+//         for (int i = 0; i < MAX_PATH_LEN; i++) e->path1[i] = 0;
+//         e->duration_ns = 0;
+//     }
+//     bpf_printk("rt: emit sys NR=%u ret=%lld\n", nr, (long long)ctx->args[1]);
+//     bpf_ringbuf_submit(e, 0);
+// }
+
+// Common ENTER/EXIT for per-syscall tracepoints.
+// path0_arg/path1_arg are arg indices holding char* paths, or -1 if none.
+static __always_inline int do_tp_enter_common(struct trace_event_raw_sys_enter *ctx,
+                                              __u32 root, __u32 tgid, __u32 pid,
+                                              int path0_arg, int path1_arg)
+{
+    if (!root_is_escalated(root)) return 0;
+
+    struct argstash_t s = {};
+    s.enter_ts_ns = bpf_ktime_get_ns();
+
+#pragma unroll
+    for (int i = 0; i < 6; i++)
+        bpf_probe_read_kernel(&s.args[i], sizeof(s.args[i]), &ctx->args[i]);
+
+    if (path0_arg >= 0)
+        s.path0_len = (__u16)snap_user_str((const void*)s.args[path0_arg], s.path0, MAX_PATH_LEN);
+    if (path1_arg >= 0)
+        s.path1_len = (__u16)snap_user_str((const void*)s.args[path1_arg], s.path1, MAX_PATH_LEN);
+
+    bpf_map_update_elem(&argstash_raw, &pid, &s, BPF_ANY);
+
+    return 0;
+}
+
+static __always_inline int do_tp_exit_common(struct trace_event_raw_sys_exit *ctx,
+                                             __u32 root, __u32 tgid, __u32 pid)
+{
+    if (!root_is_escalated(root)) return 0;
+
+    struct argstash_t *sv = bpf_map_lookup_elem(&argstash_raw, &pid);
+    if (!sv) return 0;
+
+    struct syscall_t *e = RINGBUF_RESERVE_OR_DROP(syscalls, struct syscall_t, DROP_BUFFER_SYSCALL);
+    if (!e) return 0;
+
+    __u64 now      = bpf_ktime_get_ns();
+    e->ts_ns       = sv->enter_ts_ns;
+    e->duration_ns = now - sv->enter_ts_ns;
+    e->sys_nr = ctx->id;
+
+    e->p.cgroup_id = bpf_get_current_cgroup_id();
+    e->p.root_tgid = root;
+    e->p.tgid      = tgid;
+    e->p.tid       = pid;
+
+    e->ret         = (__s64)ctx->ret;
+
+    e->arg_count   = 4;
+    e->a0 = sv->args[0]; e->a1 = sv->args[1]; e->a2 = sv->args[2]; e->a3 = sv->args[3];
+
+    e->path0_len   = sv->path0_len;
+    e->path1_len   = sv->path1_len;
+#pragma unroll
+    for (int i = 0; i < MAX_PATH_LEN; i++) e->path0[i] = sv->path0[i];
+#pragma unroll
+    for (int i = 0; i < MAX_PATH_LEN; i++) e->path1[i] = sv->path1[i];
+
+    bpf_get_current_comm(e->comm, sizeof(e->comm));
+
+    bpf_map_delete_elem(&argstash_raw, &pid);
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}

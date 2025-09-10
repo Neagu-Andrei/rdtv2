@@ -3,7 +3,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
-#include "../rdts_uapi.h"
+#include "rdts_uapi.h"
 
 /* Typically 80B; fine for ringbuf */
 
@@ -39,84 +39,6 @@ struct {
     __type(value, __u64);
 } dropped SEC(".maps");
 
-// Map to store canary inodes
-// struct {
-//     __uint(type, BPF_MAP_TYPE_HASH);
-//     __uint(max_entries, MAX_CANARY_INODES);
-//     __type(key, struct file_id);
-//     __type(value, __u8);
-
-// } canary_id SEC(".maps");
-
-// struct {
-//     __uint(type, BPF_MAP_TYPE_HASH);
-//     __uint(max_entries, MAX_NUMBER_OF_ROOT_PIDS);
-//     __type(key, struct file_id); //exec file id
-//     __type(value, __u8);    // 1 == benign
-
-// } benign_exec SEC(".maps");
-
-// struct {
-//     __uint(type, BPF_MAP_TYPE_HASH);
-//     __uint(max_entries, MAX_NUMBER_OF_ROOT_PIDS);
-//     __type(key, __u32);   // root_tgid
-//     __type(value, __u8);  // 1 = watched
-// } watched_roots SEC(".maps");
-
-// struct {
-//     __uint(type, BPF_MAP_TYPE_HASH);
-//     __uint(max_entries, MAX_NUMBER_OF_ROOT_PIDS);
-//     __type(key, __u32);   // root_tgid
-//     __type(value, __u8);  // 1 = quarantined
-// } quarantine_roots SEC(".maps");
-
-
-// struct dir_permissions { __u32 agent_root_pid; };
-// struct {
-//     __uint(type, BPF_MAP_TYPE_HASH);
-//     __uint(max_entries, 65536);
-//     __type(key, struct file_id);
-//     __type(value, struct dir_permissions);  
-// }protected_dirs SEC(".maps");
-
-
-/*  FOR DETECTION    S*/
-// struct {
-//     __uint(type, BPF_MAP_TYPE_LRU_HASH);
-//     __uint(max_entries, MAX_NUMBER_OF_ROOT_PIDS);
-//     __type(key, __u32);         /* root_tgid */
-//     __type(value, struct bucket);
-// } bucket_by_root SEC(".maps");
-
-// struct {
-//     __uint(type, BPF_MAP_TYPE_LRU_HASH);
-//     __uint(max_entries, MAX_NUMBER_OF_ROOT_PIDS);
-//     __type(key, __u32);            /* root_tgid */
-//     __type(value, struct pattern_t);
-// } pattern_by_root SEC(".maps");
-
-/* Small per-root LRU of recently touched file ids to estimate distinctness */
-// struct {
-//     __uint(type, BPF_MAP_TYPE_LRU_HASH);
-//     __uint(max_entries, 65536);
-//     __type(key, struct root_file_key);
-//     __type(value, __u8); /* presence only */
-// } recent_files SEC(".maps");
-
-/*
-not needed if you observe writes at vfs_write/fop (you already have struct file *). 
-Needed if you only have tracepoint args (fd) and still want {mount,ino} per write.
-*/
-/* If using sys_enter_write*, map (pid,fd) → file_id (updated on open/close) */
-
-//NOT SURE IF I NEED THIS
-/* Current policy/config revision hash (single entry) */
-// struct {
-//     __uint(type, BPF_MAP_TYPE_ARRAY);
-//     __uint(max_entries, 1);
-//     __type(key, __u32);
-//     __type(value, __u64); /* e.g., truncated 64-bit hash */
-// } policy_rev SEC(".maps");
 
 
 struct {
@@ -133,6 +55,13 @@ struct {
     __type(key, u32);                   /* thread id */
     __type(value, struct argstash_t);   /* __u64 argv[6] */
 } argstash SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 32768);
+    __type(key, u32);                   /* thread id */
+    __type(value, struct argstash_raw);   /* __u64 argv[6] */
+} argstash_raw SEC(".maps");
 
 struct{
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -211,3 +140,33 @@ struct {
     __type(key, __u32);     //tgid
     __type(value, __u64);   //last cgroup_id
 } last_cgroup_by_tgid SEC(".maps");
+
+
+/*
+ A small LRU map to see the root states for each root_state
+*/
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 32768);
+    __type(key, __u32);              // root_pid (your lineage key)
+    __type(value, struct root_state);
+} root_states SEC(".maps");
+
+
+struct sys_stats {
+    __u64 enter;
+    __u64 gated;
+    __u64 not_tracked;
+    __u64 emitted;
+    __u64 rb_fail;
+    // NEW (keep 8-byte alignment)
+    __u64 gate_no_state;
+    __u64 gate_not_escal;
+};
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct sys_stats);
+} sys_stats SEC(".maps");

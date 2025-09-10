@@ -1,4 +1,4 @@
-#include "../../include/vmlinux.h"
+#include "vmlinux.h"
 #include "bpf/bpf_core_read.h"
 
 #include "maps.bpf.h"
@@ -29,20 +29,32 @@ int BPF_PROG(tpbtf_fork, struct task_struct *parent, struct task_struct *child)
 SEC("tp_btf/sched_process_exec")
 int BPF_PROG(tpbtf_exec, struct task_struct *p, pid_t old_pid, struct linux_binprm *bprm)
 {
-    __u32 tgid = BPF_CORE_READ(p, tgid);
+    // __u32 tgid = BPF_CORE_READ(p, tgid);
 
-    // Optional: you can stash exec-specific context here if needed.
-    (void)bpf_map_update_elem(&root_pid_of, &tgid, &tgid, BPF_ANY);
+    // // Optional: you can stash exec-specific context here if needed.
+    // // (void)bpf_map_update_elem(&root_pid_of, &tgid, &tgid, BPF_ANY);
+    // __u32 *pr   = bpf_map_lookup_elem(&root_pid_of, &tgid);
+    // __u32 root  = pr ? *pr : tgid;
+
+    // // Re-base attribution to this image ONLY if we are not already escalated.
+    // // This preserves correct image attribution (away from the parent shell)
+    // // while keeping monitoring continuity once escalation happens.
+    // if (!root_is_escalated(root) && root != tgid) {
+    //     (void)bpf_map_update_elem(&root_pid_of, &tgid, &tgid, BPF_ANY);
+    // }
     return 0;
 }
 
 // Exit: cleanup both maps for this TGID (prevents PID reuse ghosts).
-SEC("tp_btf/sched_process_exit")
-int BPF_PROG(tpbtf_exit, struct task_struct *p, long code)
+SEC("tracepoint/sched/sched_process_exit")
+int tp_sched_process_exit(struct trace_event_raw_sched_process_template *ctx)
 {
-    __u32 tgid = BPF_CORE_READ(p, tgid);
-    (void)bpf_map_delete_elem(&root_pid_of, &tgid);
-    (void)bpf_map_delete_elem(&last_cgroup_by_tgid, &tgid);
+    struct proc_ids id = {};
+    fill_proc_ids(&id);
+    (void)bpf_map_delete_elem(&root_pid_of, &id.tgid);
+    (void)bpf_map_delete_elem(&last_cgroup_by_tgid, &id.tgid);
+    bpf_map_delete_elem(&argstash, &id.tid);
+    bpf_map_delete_elem(&argstash_raw, &id.tid);
     return 0;
 }
 
@@ -255,6 +267,7 @@ int exit_pidfd_send_signal(struct trace_event_raw_sys_exit *ctx)
 {
     __u32 tid = get_tid();
     __u32 tgid = get_tgid();
+    __u32 root = get_root_pid();
 
     struct argstash_t *st = bpf_map_lookup_elem(&argstash, &tid);
     if(!st) return 0;
@@ -275,6 +288,7 @@ int exit_pidfd_send_signal(struct trace_event_raw_sys_exit *ctx)
         }
         if ((flags & (EFFECT_KILL | EFFECT_STOP | EFFECT_FREEZE | EFFECT_PROBEONLY)) != 0) {
             emit_event(EVENT_SERVICE_STOP, flags, pid, 0);
+            mark_event_and_escalate(root, EVENT_SERVICE_STOP, 0);
         } 
     }
 
@@ -297,6 +311,7 @@ SEC("tracepoint/syscalls/sys_exit_kill")
 int exit_kill(struct trace_event_raw_sys_exit *ctx)
 {
     __u32 tid = get_tid();
+    __u32 root = get_root_pid();
     struct argstash_t *st = bpf_map_lookup_elem(&argstash, &tid);
     if (!st) return 0;
 
@@ -310,11 +325,16 @@ int exit_kill(struct trace_event_raw_sys_exit *ctx)
 
         if (flags & (EFFECT_KILL | EFFECT_STOP | EFFECT_FREEZE | EFFECT_PROBEONLY))
         {
-            if (pid <= 0) emit_event(EVENT_SERVICE_STOP, (flags | EFFECT_FANOUT),0,0);  
+            if (pid <= 0) 
+            {
+                emit_event(EVENT_SERVICE_STOP, (flags | EFFECT_FANOUT),0,0);  
+                mark_event_and_escalate(root, EVENT_SERVICE_STOP, 0);
+            }
             else{
                 __u32 target_flag =  flag_from_pid(pid);
                 if (target_flag) flags |= target_flag;
                 emit_event(EVENT_SERVICE_STOP, flags, pid, 0);
+                mark_event_and_escalate(root, EVENT_SERVICE_STOP, 0);
             }
         }
     }
@@ -401,4 +421,303 @@ int BPF_PROG(fe_cgroup_attach_task, struct task_struct *task, struct cgroup *dst
         bpf_ringbuf_submit(e, 0);
     }
     return 0;
+}
+
+/*
+
+FOR EMITING RAW SYSCALLS
+*/
+
+// ---------- openat ----------
+SEC("tracepoint/syscalls/sys_enter_openat")
+int tp_enter_openat(struct trace_event_raw_sys_enter *ctx)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_enter_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id, 1, -1);
+}
+SEC("tracepoint/syscalls/sys_exit_openat")
+int tp_exit_openat(struct trace_event_raw_sys_exit *ctx)
+{
+    /* If kernel doesn’t support openat2, glibc falls back to openat.
+       Don’t emit the v2 attempt so we don’t get double entries. */
+    if ((long)ctx->ret == -38 /* -ENOSYS */) {
+        __u32 tid = get_tid();
+        bpf_map_delete_elem(&argstash_raw, &tid); // or your enter stash, if used
+        return 0;
+    }
+
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_exit_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id);
+}
+
+// ---------- openat2 ----------
+SEC("tracepoint/syscalls/sys_enter_openat2")
+int tp_enter_openat2(struct trace_event_raw_sys_enter *ctx)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_enter_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id, 1, -1);
+}
+SEC("tracepoint/syscalls/sys_exit_openat2")
+int tp_exit_openat2(struct trace_event_raw_sys_exit *ctx)
+{
+    /* If kernel doesn’t support openat2, glibc falls back to openat.
+       Don’t emit the v2 attempt so we don’t get double entries. */
+    if ((long)ctx->ret == -38 /* -ENOSYS */) {
+        __u32 tid = get_tid();
+        bpf_map_delete_elem(&argstash_raw, &tid); // or your enter stash, if used
+        return 0;
+    }
+
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_exit_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id);
+}
+
+// ---------- unlinkat ----------
+SEC("tracepoint/syscalls/sys_enter_unlinkat")
+int tp_enter_unlinkat(struct trace_event_raw_sys_enter *ctx)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_enter_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id, 1, -1);
+}
+SEC("tracepoint/syscalls/sys_exit_unlinkat")
+int tp_exit_unlinkat(struct trace_event_raw_sys_exit *ctx)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_exit_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id);
+}
+
+// ---------- readlinkat ----------
+SEC("tracepoint/syscalls/sys_enter_readlinkat")
+int tp_enter_readlinkat(struct trace_event_raw_sys_enter *ctx)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_enter_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id, 1, -1);
+}
+SEC("tracepoint/syscalls/sys_exit_readlinkat")
+int tp_exit_readlinkat(struct trace_event_raw_sys_exit *ctx)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_exit_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id);
+}
+
+// ---------- renameat / renameat2 ----------
+SEC("tracepoint/syscalls/sys_enter_renameat")
+int tp_enter_renameat(struct trace_event_raw_sys_enter *ctx)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_enter_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id, 1, 3);
+}
+SEC("tracepoint/syscalls/sys_exit_renameat")
+int tp_exit_renameat(struct trace_event_raw_sys_exit *ctx)
+{
+    /* If kernel doesn’t support openat2, glibc falls back to openat.
+       Don’t emit the v2 attempt so we don’t get double entries. */
+    if ((long)ctx->ret == -38 /* -ENOSYS */) {
+        __u32 tid = get_tid();
+        bpf_map_delete_elem(&argstash_raw, &tid); // or your enter stash, if used
+        return 0;
+    }
+
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_exit_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id);
+}
+
+SEC("tracepoint/syscalls/sys_enter_renameat2")
+int tp_enter_renameat2(struct trace_event_raw_sys_enter *ctx)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_enter_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id, 1, 3);
+}
+SEC("tracepoint/syscalls/sys_exit_renameat2")
+int tp_exit_renameat2(struct trace_event_raw_sys_exit *ctx)
+{
+    /* If kernel doesn’t support openat2, glibc falls back to openat.
+       Don’t emit the v2 attempt so we don’t get double entries. */
+    if ((long)ctx->ret == -38 /* -ENOSYS */) {
+        __u32 tid = get_tid();
+        bpf_map_delete_elem(&argstash_raw, &tid); // or your enter stash, if used
+        return 0;
+    }
+
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_exit_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id);
+}
+
+// ---------- linkat ----------
+SEC("tracepoint/syscalls/sys_enter_linkat")
+int tp_enter_linkat(struct trace_event_raw_sys_enter *ctx)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_enter_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id, 1, 3);
+}
+SEC("tracepoint/syscalls/sys_exit_linkat")
+int tp_exit_linkat(struct trace_event_raw_sys_exit *ctx)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_exit_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id);
+}
+
+// ---------- symlinkat ----------
+SEC("tracepoint/syscalls/sys_enter_symlinkat")
+int tp_enter_symlinkat(struct trace_event_raw_sys_enter *ctx)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_enter_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id, 0, 2);
+}
+SEC("tracepoint/syscalls/sys_exit_symlinkat")
+int tp_exit_symlinkat(struct trace_event_raw_sys_exit *ctx)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_exit_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id);
+}
+
+// ---------- execve / execveat ----------
+SEC("tracepoint/syscalls/sys_enter_execve")
+int tp_enter_execve(struct trace_event_raw_sys_enter *ctx)
+{
+    // read ids
+    __u64 id = bpf_get_current_pid_tgid();
+    __u32 tgid = id >> 32;
+    __u32 tid  = (__u32)id;
+
+    // fast path: only if root is escalated (keep same gating as others if you use it)
+    if (!root_is_escalated(get_root_pid_of(tgid)))
+        return 0;
+
+    struct syscall_t *e = bpf_ringbuf_reserve(&syscalls, sizeof(*e), 0);
+    if (!e) return 0;
+
+    // args (safe reads)
+    __u64 a0 = BPF_CORE_READ(ctx, args[0]);
+    __u64 a1 = BPF_CORE_READ(ctx, args[1]);
+    __u64 a2 = BPF_CORE_READ(ctx, args[2]);
+    __u64 a3 = BPF_CORE_READ(ctx, args[3]);
+
+    // snapshot path (arg0)
+    char path0[MAX_PATH_LEN] = {};
+    __u16 p0len = (__u16)snap_user_str((const void *)a0, path0, MAX_PATH_LEN);
+
+    // fill event
+    e->ts_ns        = bpf_ktime_get_ns();
+    e->duration_ns  = 0;
+    e->p.cgroup_id  = bpf_get_current_cgroup_id();
+    e->p.root_tgid  = get_root_pid_of(tgid);
+    e->p.tgid       = tgid;
+    e->p.tid        = tid;
+
+    e->sys_nr       = BPF_CORE_READ(ctx, id);
+    e->ret          = 0;
+    e->arg_count    = 4;
+    e->a0 = a0; e->a1 = a1; e->a2 = a2; e->a3 = a3;
+
+    e->path0_len = p0len;
+    e->path1_len = 0;
+#pragma unroll
+    for (int i = 0; i < MAX_PATH_LEN; i++) e->path0[i] = path0[i];
+#pragma unroll
+    for (int i = 0; i < MAX_PATH_LEN; i++) e->path1[i] = 0;
+
+    bpf_get_current_comm(e->comm, sizeof(e->comm));
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_exit_execve")
+int tp_exit_execve(struct trace_event_raw_sys_exit *ctx)
+{
+    // No-op: we didn’t stash on enter, so nothing to emit on exit.
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_execveat")
+int tp_enter_execveat(struct trace_event_raw_sys_enter *ctx)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    __u32 tgid = id >> 32;
+    __u32 tid  = (__u32)id;
+
+    if (!root_is_escalated(get_root_pid_of(tgid)))
+        return 0;
+
+    struct syscall_t *e = bpf_ringbuf_reserve(&syscalls, sizeof(*e), 0);
+    if (!e) return 0;
+
+    __u64 a0 = BPF_CORE_READ(ctx, args[0]); // dirfd
+    __u64 a1 = BPF_CORE_READ(ctx, args[1]); // pathname
+    __u64 a2 = BPF_CORE_READ(ctx, args[2]); // argv
+    __u64 a3 = BPF_CORE_READ(ctx, args[3]); // envp
+
+    // snapshot path (arg1 for execveat)
+    char path0[MAX_PATH_LEN] = {};
+    __u16 p0len = (__u16)snap_user_str((const void *)a1, path0, MAX_PATH_LEN);
+
+    e->ts_ns        = bpf_ktime_get_ns();
+    e->duration_ns  = 0;
+    e->p.cgroup_id  = bpf_get_current_cgroup_id();
+    e->p.root_tgid  = get_root_pid_of(tgid);
+    e->p.tgid       = tgid;
+    e->p.tid        = tid;
+
+    e->sys_nr       = BPF_CORE_READ(ctx, id);
+    e->ret          = 0;
+    e->arg_count    = 4;
+    e->a0 = a0; e->a1 = a1; e->a2 = a2; e->a3 = a3;
+
+    e->path0_len = p0len;
+    e->path1_len = 0;
+#pragma unroll
+    for (int i = 0; i < MAX_PATH_LEN; i++) e->path0[i] = path0[i];
+#pragma unroll
+    for (int i = 0; i < MAX_PATH_LEN; i++) e->path1[i] = 0;
+
+    bpf_get_current_comm(e->comm, sizeof(e->comm));
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_exit_execveat")
+int tp_exit_execveat(struct trace_event_raw_sys_exit *ctx)
+{
+    // No-op: same reason as execve.
+    return 0;
+}
+
+// ---------- write-ish (no paths) ----------
+SEC("tracepoint/syscalls/sys_enter_write")
+int tp_enter_write(struct trace_event_raw_sys_enter *ctx)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_enter_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id, -1, -1);
+}
+SEC("tracepoint/syscalls/sys_exit_write")
+int tp_exit_write(struct trace_event_raw_sys_exit *ctx)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_exit_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id);
+}
+
+SEC("tracepoint/syscalls/sys_enter_pwrite64")
+int tp_enter_pwrite64(struct trace_event_raw_sys_enter *ctx)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_enter_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id, -1, -1);
+}
+SEC("tracepoint/syscalls/sys_exit_pwrite64")
+int tp_exit_pwrite64(struct trace_event_raw_sys_exit *ctx)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_exit_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id);
+}
+
+SEC("tracepoint/syscalls/sys_enter_fsync")
+int tp_enter_fsync(struct trace_event_raw_sys_enter *ctx)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_enter_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id, -1, -1);
+}
+SEC("tracepoint/syscalls/sys_exit_fsync")
+int tp_exit_fsync(struct trace_event_raw_sys_exit *ctx)
+{
+    __u64 id = bpf_get_current_pid_tgid();
+    return do_tp_exit_common(ctx, get_root_pid_of(id >> 32), id >> 32, (__u32)id);
 }

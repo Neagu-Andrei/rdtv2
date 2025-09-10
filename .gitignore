@@ -22,3 +22,8 @@ include/
 
 # System files
 .DS_Store
+
+
+elk-siem/.env
+elk-siem/logstash/certs/*.key
+elk-siem/logstash/certs/*.crt

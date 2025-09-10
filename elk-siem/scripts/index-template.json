@@ -1,0 +1,86 @@
+{
+  "index_patterns": ["rtdst-syscalls*"],
+  "template": {
+    "settings": {
+      "index.lifecycle.name": "rtdst-ilm",
+      "index.lifecycle.rollover_alias": "rtdst-syscalls",
+      "number_of_shards": 1,
+      "number_of_replicas": 0
+    },
+    "mappings": {
+      "dynamic": true,
+      "properties": {
+        "@timestamp": { "type": "date" },
+
+        "event": {
+          "properties": {
+            "kind": { "type": "keyword" },
+            "category": { "type": "keyword" },
+            "type": { "type": "keyword" },
+            "action": { "type": "keyword" },
+            "dataset": { "type": "keyword" }
+          }
+        },
+
+        "host": {
+          "properties": {
+            "hostname": { "type": "keyword" },
+            "ip": { "type": "ip" }
+          }
+        },
+
+        "user": {
+          "properties": {
+            "id": { "type": "keyword" },
+            "name": { "type": "keyword" },
+            "effective": {
+              "properties": {
+                "id": { "type": "keyword" },
+                "name": { "type": "keyword" }
+              }
+            }
+          }
+        },
+
+        "process": {
+          "properties": {
+            "pid": { "type": "long" },
+            "ppid": { "type": "long" },
+            "parent": { "properties": { "pid": { "type": "long" } } },
+            "executable": { "type": "keyword" },
+            "command_line": { "type": "text" },
+            "args": { "type": "keyword" },
+            "start": { "type": "date" }
+          }
+        },
+
+        "file": {
+          "properties": {
+            "path": { "type": "keyword" },
+            "extension": { "type": "keyword" },
+            "inode": { "type": "long" },
+            "size": { "type": "long" },
+            "device": { "type": "keyword" }
+          }
+        },
+
+        "rtds": {
+          "properties": {
+            "root_pid": { "type": "long" },
+            "event_type": { "type": "keyword" },
+            "event_id": { "type": "integer" },
+            "flags": { "type": "keyword" },
+            "syscall": { "type": "keyword" },
+            "path": { "type": "keyword" },
+            "argv": { "type": "keyword" },
+            "bytes": { "type": "long" },
+            "dir_inode": { "type": "long" },
+            "inode": { "type": "long" },
+            "cgroup_id": { "type": "unsigned_long" }
+          }
+        }
+      }
+    }
+  },
+  "priority": 500
+}

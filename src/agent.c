@@ -1,12 +1,17 @@
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
-#include<stdio.h> 
-#include<stdlib.h> 
-#include<signal.h> 
-#include<errno.h> 
-#include<sys/resource.h> 
-#include<time.h> 
-#include<unistd.h>
+#include <errno.h>
+#include <signal.h>
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/resource.h>
+#include <syslog.h>
+#include <time.h>
+#include <unistd.h>
+#include <string.h>
 
 #include "../include/rtds.skel.h"
 
@@ -21,6 +26,29 @@ static void bump_memlock(void) {
     if (setrlimit(RLIMIT_MEMLOCK, &r) != 0) {
         perror("setrlimit(RLIMIT_MEMLOCK)");
     }
+}
+
+static int parse_facility(const char *s) {
+    if (!s) return LOG_AUTHPRIV;
+    if (!strcasecmp(s, "AUTH") || !strcasecmp(s, "AUTHPRIV")) return LOG_AUTHPRIV;
+    if (!strcasecmp(s, "DAEMON")) return LOG_DAEMON;
+    if (!strcasecmp(s, "LOCAL0")) return LOG_LOCAL0;
+    if (!strcasecmp(s, "LOCAL1")) return LOG_LOCAL1;
+    if (!strcasecmp(s, "LOCAL2")) return LOG_LOCAL2;
+    if (!strcasecmp(s, "LOCAL3")) return LOG_LOCAL3;
+    if (!strcasecmp(s, "LOCAL4")) return LOG_LOCAL4;
+    if (!strcasecmp(s, "LOCAL5")) return LOG_LOCAL5;
+    if (!strcasecmp(s, "LOCAL6")) return LOG_LOCAL6;
+    if (!strcasecmp(s, "LOCAL7")) return LOG_LOCAL7;
+    return LOG_AUTHPRIV;
+}
+
+static void init_syslog(void) {
+    const char *fac = getenv("RTDS_SYSLOG_FACILITY");
+    int facility = parse_facility(fac);
+    openlog("rtds-agent", LOG_PID | LOG_NDELAY, facility);
+    // Default mask: log info and above
+    setlogmask(LOG_UPTO(LOG_INFO));
 }
 
 static int libbpf_print(enum libbpf_print_level level, const char *fmt, va_list args) {
@@ -45,6 +73,7 @@ static const char *event_name(__u8 t)
     case 106:  return "EVENT_MMAP_COMMIT";
     case 107: return "EVENT_ENCRYPT_INPLACE_DOMBIN";
     case 108: return "EVENT_CGROUP_MOVE";
+    case 109: return "EVENT_ESCALATE_ROOT";
     default: return "EVENT";
     }
 }
@@ -112,6 +141,19 @@ static char *event_flags_to_string(uint8_t type, uint32_t flags)
         if (flags & FLAG_MOVED_TO_WHITELISTED_CGROUP)  strncat(buf, "to a whitelisted cgroup", sizeof buf - strlen(buf) - 1);
         if (flags & FLAG_FIRST_TIME_MOVED_TO_CGROUP)   strncat(buf, "first", sizeof buf - strlen(buf) - 1);
     }
+    case EVENT_ESCALATE_ROOT: {
+        if (!flags) {
+            snprintf(buf, sizeof buf, "none");
+            break;
+        }
+        /* channels */
+        if (flags & BIT_SYSINFO_DISCOVERY)  strncat(buf, "system information discovery", sizeof buf - strlen(buf) - 1);
+        if (flags & BIT_PROCESS_DISCOVERY)   strncat(buf, "process discovery", sizeof buf - strlen(buf) - 1);
+        if (flags & BIT_SERVICE_STOP)   strncat(buf, "service stop", sizeof buf - strlen(buf) - 1);
+        if (flags & BIT_OPEN_HOST_DATA)   strncat(buf, "open host data", sizeof buf - strlen(buf) - 1);
+        if (flags & BIT_MOVED_TO_WHITELISTED_CGROUP)   strncat(buf, "moved to a whitelisted control group", sizeof buf - strlen(buf) - 1);
+
+    }
     default:
         /* Unknown or unsupported event type: dump the raw value */
         snprintf(buf, sizeof buf, "0x%x", flags);
@@ -175,6 +217,14 @@ static void emit_cgroup_change(const struct event_t *e)
            ms,e->p.tid, e->p.tgid, e->p.root_tgid, event_name(e->type),event_flags_to_string(e->type, e->event_flags), e->arg0, e->arg1);
 }
 
+static void emit_escalate_root(const struct event_t *e)
+{
+    double ms = e->ts_ns / 1e6;
+    printf("[%.3f ms] pid=%u tgid=%u root=%u event=%s context=[%s]"
+           "from %llu to %llu\n",
+           ms,e->p.tid, e->p.tgid, e->p.root_tgid, event_name(e->type),event_flags_to_string(e->type, e->event_flags), e->arg0, e->arg1);
+}
+
 static void emit_generic(const struct event_t *e)
 {
     double ms = e->ts_ns / 1e6;
@@ -196,11 +246,11 @@ static void emit_event(const struct event_t *e)
     case EVENT_SERVICE_STOP:
         emit_service_stop(e);
         break;
-    case EVENT_ENCRYPT_INPLACE_DOMBIN:
-        emit_encrypt_inplace_dombin(e);
-        break;
     case EVENT_CGROUP_MOVE:
         emit_cgroup_change(e);
+        break;
+    case EVENT_ESCALATE_ROOT:
+        emit_escalate_root(e);
         break;
     default:
         /* Unknown or unimplemented event type */

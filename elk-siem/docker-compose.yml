@@ -1,4 +1,3 @@
-version: "3.9"
 services:
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.14.3
@@ -8,7 +7,7 @@ services:
       - xpack.security.enabled=true
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
       - ES_JAVA_OPTS=${ES_JAVA_OPTS}
-    ports: ["9200:9200","9300:9300"]
+    ports: ['9200:9200', '9300:9300']
     volumes:
       - esdata:/usr/share/elasticsearch/data
 
@@ -20,15 +19,16 @@ services:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
       - ELASTICSEARCH_USERNAME=kibana_system
       - ELASTICSEARCH_PASSWORD=${KIBANA_SYSTEM_PASSWORD}
-    ports: ["5601:5601"]
+    ports: ['5601:5601']
 
   logstash:
-    image: docker.elastic.co/logstash/logstash:8.14.3
+    build: ./logstash
     container_name: ls
     depends_on: [elasticsearch]
     environment:
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-changeme}
       - LS_JAVA_OPTS=${LS_JAVA_OPTS}
-    ports: ["2514:2514/tcp"]
+    ports: ['2514:2514/tcp']
     volumes:
       - ./logstash/pipeline:/usr/share/logstash/pipeline
       - ./logstash/certs:/certs

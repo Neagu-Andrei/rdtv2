@@ -9,7 +9,8 @@
 
 # Build directories
 obj/
-include/
+include/vmlinux.h
+include/rtds.skel.h
 
 # Logs and traces
 *.log
